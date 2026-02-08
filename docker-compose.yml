@@ -1,0 +1,9 @@
+version: "3.9"
+services:
+  cinebot:
+    build: .
+    environment:
+      - TMDB_API_KEY=${TMDB_API_KEY}
+    ports:
+      - "8000:8000"
+      - "8501:8501"

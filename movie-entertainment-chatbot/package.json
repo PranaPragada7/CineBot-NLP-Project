@@ -1,0 +1,36 @@
+{
+  "name": "movie-entertainment-chatbot",
+  "version": "1.0.0",
+  "description": "An advanced chatbot for movie and entertainment recommendations with contextual dialogue and emotion-aware responses.",
+  "main": "src/app.ts",
+  "scripts": {
+    "start": "ts-node src/app.ts",
+    "build": "tsc",
+    "test": "jest"
+  },
+  "dependencies": {
+    "express": "^4.17.1",
+    "body-parser": "^1.19.0",
+    "dotenv": "^10.0.0",
+    "axios": "^0.21.1",
+    "cors": "^2.8.5",
+    "typescript": "^4.3.2",
+    "ts-node": "^10.0.0",
+    "jest": "^27.0.0",
+    "express-jwt": "^5.3.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.11",
+    "@types/jest": "^27.0.0",
+    "@types/node": "^16.0.0"
+  },
+  "keywords": [
+    "chatbot",
+    "movie",
+    "recommendation",
+    "NLP",
+    "emotion"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
+}

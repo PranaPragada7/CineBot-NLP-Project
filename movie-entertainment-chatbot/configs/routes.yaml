@@ -1,0 +1,9 @@
+routes:
+  chat:
+    path: /api/chat
+    method: POST
+    description: Handles user chat interactions
+  recommend:
+    path: /api/recommend
+    method: GET
+    description: Provides movie recommendations based on user input

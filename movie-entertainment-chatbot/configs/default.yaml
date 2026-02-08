@@ -1,0 +1,23 @@
+default: 
+  server:
+    host: "localhost"
+    port: 3000
+  logging:
+    level: "info"
+  nlp:
+    intent_recognition_model: "path/to/intent/model"
+    entity_extraction_model: "path/to/entity/model"
+  recommendation:
+    algorithm: "hybrid"
+    max_results: 10
+  emotion_detection:
+    model: "path/to/emotion/model"
+  knowledge:
+    use_rag: true
+    retriever:
+      type: "vector"
+      index_path: "path/to/index"
+  templates:
+    greeting: "Hello! How can I assist you today?"
+    fallback: "I'm sorry, I didn't quite understand that. Can you please rephrase?"
+    recommendation: "Based on your preferences, I recommend the following movies: {movies}"
