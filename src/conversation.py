@@ -1,142 +1,148 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from typing import Any, Dict
+from datetime import UTC, datetime
+from threading import RLock
+from typing import Any
+from uuid import uuid4
 
-from .intent_router import IntentRouter
-from .nlp.pipeline import NLPPipeline
-from .response_generator import ResponseGenerator
-from .services.tmdb import TMDbClient
-from .store.memory import MemoryStore
-
-
-class ConversationState:
-    """
-    Holds the state of a single conversation session, including history.
-    This object is what gets saved to and loaded from disk.
-    """
-
-    def __init__(self):
-        self.last_mentioned_movie: Dict[str, Any] | None = None
-        self.last_intent: str | None = None
-        # A list to store tuples of (user_message, bot_response)
-        self.history: list[tuple[str, str]] = []
-
-    def update(self, user_message: str, bot_response: str, intent: str, movie: Dict[str, Any] | None):
-        """Updates the state after a turn."""
-        self.history.append((user_message, bot_response))
-        self.last_intent = intent
-        if movie:
-            self.last_mentioned_movie = movie
-
-    @classmethod
-    def from_dict(cls, data: dict) -> ConversationState:
-        """Creates a ConversationState object from a dictionary (loaded from JSON)."""
-        state = cls()
-        state.last_mentioned_movie = data.get("last_mentioned_movie")
-        state.last_intent = data.get("last_intent")
-        state.history = [tuple(item) for item in data.get("history", [])]
-        return state
-
-    def to_dict(self) -> dict:
-        """Converts the ConversationState object to a dictionary for JSON serialization."""
-        return {
-            "last_mentioned_movie": self.last_mentioned_movie,
-            "last_intent": self.last_intent,
-            "history": self.history,
-        }
+from src.nlp.pipeline import NLPPipeline
+from src.response_generator import ResponseGenerator
+from src.services.tmdb import TMDbClient
 
 
 class ConversationManager:
-    """
-    The main orchestrator, now with persistent, file-based session management.
-    """
+    """Coordinates intent detection, movie retrieval, and session history."""
 
-    def __init__(self, tmdb_client: TMDbClient, store: MemoryStore):
-        print("Initializing Conversation Manager...")
-        self.nlp_pipeline = NLPPipeline()
-        self.intent_router = IntentRouter(tmdb_client, store)
-        self.response_generator = ResponseGenerator()
+    def __init__(self, tmdb_client: TMDbClient | None = None) -> None:
+        self.tmdb_client = tmdb_client or TMDbClient()
+        self.pipeline = NLPPipeline(self.tmdb_client.known_titles)
+        self.responses = ResponseGenerator()
+        self._sessions: dict[str, dict[str, Any]] = {}
+        self._lock = RLock()
 
-        # Define and create the directory for session files
-        self.sessions_dir = Path(__file__).parent.parent / "data" / "sessions"
-        self.sessions_dir.mkdir(exist_ok=True)
+    @property
+    def data_source(self) -> str:
+        return self.tmdb_client.source_label
 
-        print(f"Session data will be stored in: {self.sessions_dir}")
-        print("Conversation Manager initialized successfully.")
+    def _session(self, session_id: str) -> dict[str, Any]:
+        with self._lock:
+            return self._sessions.setdefault(
+                session_id,
+                {"last_movie": None, "history": [], "feedback": {}},
+            )
 
-    def _get_session_filepath(self, session_id: str) -> Path:
-        """Generates a valid and safe filepath for a session ID."""
-        # Sanitize session_id to prevent directory traversal attacks
-        safe_filename = "".join(c for c in session_id if c.isalnum() or c in ("-", "_"))
-        return self.sessions_dir / f"session_{safe_filename}.json"
+    def _resolve_movie(self, title: str | None) -> dict[str, Any] | None:
+        return self.tmdb_client.search_movie(title) if title else None
 
-    def _load_session(self, session_id: str) -> ConversationState:
-        """Loads a session from its JSON file, or returns a new one if not found."""
-        filepath = self._get_session_filepath(session_id)
-        if filepath.exists():
-            print(f"Loading existing session: {session_id}")
-            with open(filepath) as f:
-                data = json.load(f)
-                return ConversationState.from_dict(data)
+    def _reply(
+        self,
+        intent: str,
+        title: str | None,
+    ) -> tuple[str, dict[str, Any] | None, list[str]]:
+        movie = self._resolve_movie(title)
+        default_suggestions = [
+            "What is trending?",
+            "Who directed Inception?",
+            "Recommend movies like Arrival",
+        ]
 
-        print(f"Creating new session: {session_id}")
-        return ConversationState()
+        if intent == "greet":
+            return self.responses.welcome(), None, default_suggestions
+        if intent == "help":
+            return self.responses.help_text(), None, default_suggestions
+        if intent == "upcoming_releases":
+            heading = (
+                "Here are upcoming releases from TMDB:"
+                if self.tmdb_client.is_live
+                else "Live release data needs a TMDB key. Here are offline catalog picks:"
+            )
+            return (
+                self.responses.movie_list(heading, self.tmdb_client.upcoming_movies()),
+                None,
+                default_suggestions,
+            )
+        if intent == "trending":
+            heading = (
+                "Trending on TMDB this week:"
+                if self.tmdb_client.is_live
+                else "Top-rated titles in the offline catalog:"
+            )
+            return (
+                self.responses.movie_list(heading, self.tmdb_client.trending_movies()),
+                None,
+                default_suggestions,
+            )
+        if intent in {"movie_info", "who_directed", "recommend"} and not title:
+            action = {
+                "movie_info": "look it up",
+                "who_directed": "find its director",
+                "recommend": "find similar titles",
+            }[intent]
+            return self.responses.missing_title(action), None, default_suggestions
+        if intent in {"movie_info", "who_directed", "recommend"} and not movie:
+            return self.responses.not_found(title or "that title"), None, default_suggestions
+        if intent == "movie_info" and movie:
+            details = self.tmdb_client.movie_details(movie["id"]) or movie
+            suggestions = [
+                f"Who directed {details['title']}?",
+                f"Recommend movies like {details['title']}",
+                "What is trending?",
+            ]
+            return self.responses.movie_info(details), details, suggestions
+        if intent == "who_directed" and movie:
+            details = self.tmdb_client.movie_details(movie["id"]) or movie
+            return self.responses.director(details), details, default_suggestions
+        if intent == "recommend" and movie:
+            recommendations = self.tmdb_client.similar_movies(movie["id"])
+            return (
+                self.responses.movie_list(
+                    f"If you liked **{movie['title']}**, try:", recommendations
+                ),
+                movie,
+                default_suggestions,
+            )
+        return self.responses.fallback(), None, default_suggestions
 
-    def _save_session(self, session_id: str, state: ConversationState):
-        """Saves the current session state to its JSON file."""
-        filepath = self._get_session_filepath(session_id)
-        with open(filepath, "w") as f:
-            json.dump(state.to_dict(), f, indent=2)
+    def handle_message(self, session_id: str, user_message: str) -> dict[str, Any]:
+        state = self._session(session_id)
+        nlp_result = self.pipeline.run(user_message)
+        title = nlp_result.get("movie_title")
+        if not title and nlp_result["intent"] in {"movie_info", "who_directed", "recommend"}:
+            last_movie = state.get("last_movie")
+            if last_movie and any(
+                pronoun in user_message.casefold() for pronoun in ("it", "that movie", "that one")
+            ):
+                title = last_movie["title"]
 
-    def _contextual_preprocessing(self, text: str, state: ConversationState) -> str:
-        """Uses conversation state to enrich the user's message."""
-        processed_text = text.lower()
+        reply, movie, suggestions = self._reply(nlp_result["intent"], title)
+        message_id = uuid4().hex
+        turn = {
+            "message_id": message_id,
+            "user": user_message,
+            "assistant": reply,
+            "intent": nlp_result["intent"],
+            "sentiment": nlp_result["sentiment"],
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+        with self._lock:
+            state["history"].append(turn)
+            if movie:
+                state["last_movie"] = movie
+        return {**turn, "reply": reply, "suggestions": suggestions}
 
-        # If the user says "it", "that one", etc., and we have a movie in memory,
-        # substitute the pronoun with the actual movie title.
-        if state.last_mentioned_movie:
-            movie_title = state.last_mentioned_movie.get("title", "")
-            pronouns = ["it", "that one", "that movie", "its"]
-            # Check if the user's message is short and contains a pronoun
-            if any(p == processed_text.strip() for p in pronouns) or any(p in processed_text.split() for p in pronouns):
-                if movie_title:
-                    print(f"Contextual substitution: Replacing pronoun with '{movie_title}'")
-                    # Replace all instances of the pronouns
-                    for p in pronouns:
-                        processed_text = processed_text.replace(p, movie_title)
+    def history(self, session_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            state = self._sessions.get(session_id)
+            return [dict(turn) for turn in state["history"]] if state else []
 
-        return processed_text
+    def record_feedback(self, session_id: str, message_id: str, rating: int) -> bool:
+        with self._lock:
+            state = self._sessions.get(session_id)
+            if not state or not any(turn["message_id"] == message_id for turn in state["history"]):
+                return False
+            state["feedback"][message_id] = rating
+            return True
 
-    def handle_message(self, session_id: str, user_message: str) -> str:
-        """
-        Main entry point with full load/process/save cycle.
-        """
-        # 1. Load the user's complete conversation history and state
-        state = self._load_session(session_id)
-
-        # 2. Pre-process the message using the loaded context
-        processed_message = self._contextual_preprocessing(user_message, state)
-
-        # 3. Run NLP and Intent Routing
-        nlp_result = self.nlp_pipeline.run(processed_message)
-        intent_data = self.intent_router.route(nlp_result)
-
-        # 4. Generate a response
-        bot_response = self.response_generator.generate(nlp_result.get("intent"), intent_data)
-
-        # 5. Update the state with the latest turn
-        last_movie = None
-        if isinstance(intent_data, dict) and "movie" in intent_data:
-            last_movie = intent_data["movie"]
-        elif isinstance(intent_data, list) and intent_data:
-            # For recommendations, we don't set a single "last movie" to avoid ambiguity
-            pass
-
-        state.update(user_message, bot_response, nlp_result.get("intent"), last_movie)
-
-        # 6. Save the updated state back to the disk
-        self._save_session(session_id, state)
-
-        return bot_response
+    def clear(self, session_id: str) -> None:
+        with self._lock:
+            self._sessions.pop(session_id, None)

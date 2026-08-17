@@ -1,42 +1,65 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any
 
 
 class ResponseGenerator:
-    """
-    Generates user-friendly text responses from structured data.
-    """
+    @staticmethod
+    def welcome() -> str:
+        return (
+            "Hi! I can help you discover movies, check directors, review what is "
+            "trending, and find similar titles."
+        )
 
-    def generate(self, intent: str, data: Any) -> str:
-        """
-        Selects the appropriate generation method based on the intent.
-        """
-        method_name = f"_generate_{intent}"
-        generator_method = getattr(self, method_name, self._generate_fallback)
-        return generator_method(data)
+    @staticmethod
+    def help_text() -> str:
+        return (
+            "Ask about a movie, request titles similar to one you enjoyed, check who "
+            "directed a film, or ask what is trending."
+        )
 
-    def _generate_fallback(self, data: Any) -> str:
-        return "I'm not sure how to help with that. You can ask me about new releases, movie directors, or for recommendations."
+    @staticmethod
+    def missing_title(action: str) -> str:
+        return f"Which movie should I use to {action}? Include the title in your message."
 
-    def _generate_upcoming_releases(self, data: List[Dict[str, Any]]) -> str:
-        if not data:
-            return "I couldn't find any upcoming movies right now."
+    @staticmethod
+    def movie_info(movie: dict[str, Any]) -> str:
+        year = str(movie.get("release_date") or "")[:4] or "release year unavailable"
+        rating = movie.get("vote_average") or 0
+        genres = ", ".join(movie.get("genres") or [])
+        details = [f"**{movie['title']}** ({year})"]
+        if genres:
+            details.append(genres)
+        if rating:
+            details.append(f"TMDB rating: {rating:.1f}/10")
+        header = " · ".join(details)
+        return f"{header}\n\n{movie.get('overview') or 'No overview is available.'}"
 
-        movie_titles = [f"- {movie['title']} (releasing on {movie['release_date']})" for movie in data]
-        return "Here are some of the latest upcoming releases:\n" + "\n".join(movie_titles)
+    @staticmethod
+    def director(movie: dict[str, Any]) -> str:
+        director = movie.get("director")
+        if not director:
+            return f"I found **{movie['title']}**, but its director was not available."
+        return f"**{movie['title']}** was directed by **{director}**."
 
-    def _generate_who_directed(self, data: Dict[str, Any]) -> str:
-        if not data or "director" not in data:
-            return "I couldn't find the director for that movie. Please make sure you've spelled the title correctly."
+    @staticmethod
+    def movie_list(heading: str, movies: list[dict[str, Any]]) -> str:
+        if not movies:
+            return "I could not find matching movies right now."
+        rows = []
+        for movie in movies:
+            year = str(movie.get("release_date") or "")[:4]
+            suffix = f" ({year})" if year else ""
+            rows.append(f"- **{movie['title']}**{suffix}")
+        return heading + "\n\n" + "\n".join(rows)
 
-        movie_title = data["movie"]["title"]
-        director_name = data["director"]
-        return f"The director of '{movie_title}' is {director_name}."
+    @staticmethod
+    def not_found(title: str) -> str:
+        return f"I could not find a confident match for **{title}**. Try the full movie title."
 
-    def _generate_recommend(self, data: List[Dict[str, Any]]) -> str:
-        if not data:
-            return "I couldn't find any recommendations for that movie. It might be too obscure or new."
-
-        movie_titles = [f"- {movie['title']}" for movie in data]
-        return "Based on your request, you might like these movies:\n" + "\n".join(movie_titles)
+    @staticmethod
+    def fallback() -> str:
+        return (
+            "I did not recognize that as a movie request. Ask for movie details, a "
+            "director, recommendations, upcoming releases, or trending titles."
+        )

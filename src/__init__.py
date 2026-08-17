@@ -1,1 +1,1 @@
-
+"""CineBot application package."""
