@@ -1,3 +1,21 @@
-.venv/ 
-__pycache__/ 
-data/ 
+# Local configuration
+.env
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Runtime data
+data/
+*.log
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

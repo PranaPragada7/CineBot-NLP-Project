@@ -1,63 +1,96 @@
 from __future__ import annotations
 
+import re
 from typing import Any
-
-from sentence_transformers import SentenceTransformer, util
-
-from .entity_linker import EntityLinker
 
 
 class NLPPipeline:
-    """
-    A more advanced NLP pipeline using semantic similarity for intent detection
-    and spaCy for entity recognition.
-    """
+    """Fast, deterministic intent and entity extraction for movie questions."""
 
-    def __init__(self, movie_data: list):
-        print("Loading NLP Pipeline models...")
-        # Use a powerful model for understanding sentence meaning
-        self.intent_model = SentenceTransformer("all-MiniLM-L6-v2")
-        # Initialize our custom entity linker
-        self.entity_linker = EntityLinker(movie_data)
+    POSITIVE_WORDS = {
+        "amazing",
+        "best",
+        "enjoyed",
+        "excellent",
+        "great",
+        "love",
+        "loved",
+        "liked",
+    }
+    NEGATIVE_WORDS = {"awful", "bad", "boring", "dislike", "hate", "poor", "worst"}
 
-        # Define intents with descriptive sentences that capture their meaning
-        self.intent_map = {
-            "upcoming_releases": "The user wants to know about new movies that are coming out soon.",
-            "who_directed": "The user is asking for the name of the director of a specific film.",
-            "recommend": "The user wants a movie recommendation similar to another movie they mentioned.",
-        }
-        # Pre-calculate the numerical representations (embeddings) for our intent descriptions
-        self.intent_embeddings = self.intent_model.encode(list(self.intent_map.values()))
-        print("NLP Pipeline loaded successfully.")
+    def __init__(self, known_titles: list[str] | None = None) -> None:
+        self.known_titles = sorted(known_titles or [], key=len, reverse=True)
 
-    def _get_intent(self, text: str) -> dict:
-        """
-        Calculates intent by finding the most semantically similar description.
-        """
-        text_embedding = self.intent_model.encode(text)
-        similarities = util.cos_sim(text_embedding, self.intent_embeddings)[0]
+    @staticmethod
+    def _intent(text: str) -> tuple[str, float]:
+        lowered = text.casefold()
+        if re.search(r"\b(hi|hello|hey)\b", lowered):
+            return "greet", 0.98
+        if "who directed" in lowered or "director of" in lowered:
+            return "who_directed", 0.99
+        if any(term in lowered for term in ("recommend", "suggest", "similar to", "movies like")):
+            return "recommend", 0.96
+        if any(term in lowered for term in ("upcoming", "coming soon", "new releases")):
+            return "upcoming_releases", 0.96
+        if any(term in lowered for term in ("trending", "popular right now", "what is popular")):
+            return "trending", 0.96
+        if any(
+            term in lowered for term in ("tell me about", "movie info", "details about", "plot of")
+        ):
+            return "movie_info", 0.92
+        if any(term in lowered for term in ("what can you do", "help", "commands")):
+            return "help", 0.95
+        return "fallback", 0.35
 
-        top_intent_index = similarities.argmax().item()
-        top_intent_score = similarities[top_intent_index].item()
-        top_intent_name = list(self.intent_map.keys())[top_intent_index]
+    def _movie_title(self, text: str) -> str | None:
+        lowered = text.casefold()
+        for title in self.known_titles:
+            if title.casefold() in lowered:
+                return title
 
-        return {"intent": top_intent_name, "intent_confidence": top_intent_score}
+        quoted = re.search(r"[\"']([^\"']{2,80})[\"']", text)
+        if quoted:
+            return quoted.group(1).strip()
 
-    def _get_entities(self, text: str) -> dict:
-        """
-        Extracts entities using our custom EntityLinker.
-        """
-        return self.entity_linker.extract_entities(text)
+        patterns = (
+            r"(?:who\s+directed|director\s+of)\s+(.+)",
+            r"(?:similar\s+to|movies?\s+like)\s+(.+)",
+            r"(?:tell\s+me\s+about|details\s+about|plot\s+of|movie\s+info\s+for)\s+(.+)",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                candidate = match.group(1).strip(' .?!,"')
+                if candidate and candidate.casefold() not in {
+                    "a movie",
+                    "it",
+                    "movies",
+                    "something",
+                    "that movie",
+                    "that one",
+                }:
+                    return candidate
+        return None
 
-    def run(self, text: str, ctx: dict = None) -> dict[str, Any]:
-        """
-        The main method to process a user's text input.
-        """
-        intent_result = self._get_intent(text)
-        entities = self._get_entities(text)
+    def _sentiment(self, text: str) -> dict[str, Any]:
+        tokens = set(re.findall(r"[a-z']+", text.casefold()))
+        positive = len(tokens.intersection(self.POSITIVE_WORDS))
+        negative = len(tokens.intersection(self.NEGATIVE_WORDS))
+        if positive > negative:
+            label = "positive"
+        elif negative > positive:
+            label = "negative"
+        else:
+            label = "neutral"
+        return {"label": label, "score": round((positive - negative) / max(len(tokens), 1), 3)}
 
+    def run(self, text: str, ctx: dict[str, Any] | None = None) -> dict[str, Any]:
+        del ctx
+        intent, confidence = self._intent(text)
         return {
-            "intent": intent_result["intent"],
-            "intent_confidence": intent_result["intent_confidence"],
-            "entities": entities,
+            "intent": intent,
+            "intent_confidence": confidence,
+            "movie_title": self._movie_title(text),
+            "sentiment": self._sentiment(text),
         }
