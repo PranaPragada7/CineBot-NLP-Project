@@ -1,6 +1,7 @@
 # CineBot
 
 [![CI](https://github.com/PranaPragada7/CineBot-NLP-Project/actions/workflows/ci.yml/badge.svg)](https://github.com/PranaPragada7/CineBot-NLP-Project/actions/workflows/ci.yml)
+![Coverage](https://img.shields.io/badge/coverage-80%25%2B-brightgreen)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-API-009688?logo=fastapi&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-UI-FF4B4B?logo=streamlit&logoColor=white)
@@ -112,6 +113,15 @@ docker compose up --build
 The compose file passes `TMDB_API_KEY` at runtime. Credentials are never copied
 into the container image.
 
+## Deployment notes
+
+- The in-memory conversation store is intended for a single-process demo. A
+  production deployment should use a shared persistent store.
+- The built-in catalog is deliberately small and exists for reliable local
+  demonstrations, not as a replacement for TMDB's live catalog.
+- Live results depend on TMDB availability, rate limits, and API-key access.
+- Feedback is retained only for the life of the API process.
+
 ## Quality checks
 
 ```powershell
@@ -123,7 +133,7 @@ python -m pytest -q
 ```
 
 The tests run entirely against the offline catalog and do not make live TMDB
-requests.
+requests. Coverage must remain at or above 80% across the application package.
 
 ## Project structure
 
@@ -146,3 +156,6 @@ requests.
 | `CINEBOT_API_URL` | No | `http://127.0.0.1:8000` |
 
 This product uses the TMDB API but is not endorsed or certified by TMDB.
+
+See [`CHANGELOG.md`](CHANGELOG.md) for release history and
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for contribution guidelines.

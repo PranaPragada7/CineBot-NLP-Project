@@ -17,30 +17,137 @@ st.set_page_config(page_title="CineBot", page_icon="🎬", layout="wide")
 st.markdown(
     """
     <style>
-        .stApp { background: #f6f7fb; color: #111827; }
-        [data-testid="stSidebar"] { background: #101827; }
-        [data-testid="stSidebar"] * { color: #e5e7eb; }
-        [data-testid="stSidebar"] a { color: #a5b4fc !important; }
+        :root {
+            --night: #08090d;
+            --panel: #14161d;
+            --panel-soft: #1b1e27;
+            --line: #2d303b;
+            --ink: #f8f4ed;
+            --muted: #aaa6a0;
+            --accent: #e35d3f;
+            --accent-dark: #9e2f26;
+            --gold: #d7a852;
+        }
+
+        .stApp {
+            background:
+                radial-gradient(circle at 80% -10%, rgba(158, 47, 38, .24), transparent 28rem),
+                var(--night);
+            color: var(--ink);
+        }
+        html,
+        body,
+        [data-testid="stAppViewContainer"],
+        [data-testid="stMain"],
+        [data-testid="stBottom"],
+        [data-testid="stBottomBlockContainer"] {
+            background-color: var(--night) !important;
+        }
+        header[data-testid="stHeader"] {
+            background: rgba(8, 9, 13, .96) !important;
+        }
+        .block-container { max-width: 1120px; padding-top: 2.6rem; }
+        [data-testid="stMain"] h1,
+        [data-testid="stMain"] h2,
+        [data-testid="stMain"] h3,
+        [data-testid="stMain"] p,
+        [data-testid="stMain"] label { color: var(--ink) !important; }
+        [data-testid="stMain"] [data-testid="stCaptionContainer"] p {
+            color: var(--muted) !important;
+        }
+        [data-testid="stSidebar"] {
+            background: #0d0f15;
+            border-right: 1px solid #252831;
+        }
+        [data-testid="stSidebar"] * { color: #e8e4dc; }
+        [data-testid="stSidebar"] a { color: #efaa87 !important; }
         [data-testid="stSidebar"] button {
-            background: #4f46e5;
-            border-color: #6366f1;
+            background: linear-gradient(135deg, var(--accent), var(--accent-dark));
+            border: 0;
         }
         [data-testid="stSidebar"] button p { color: #ffffff !important; }
         .hero {
+            position: relative;
+            overflow: hidden;
             padding: 2rem 2.2rem;
-            border-radius: 22px;
+            border: 1px solid #6e3029;
+            border-radius: 10px;
             color: white;
-            background: linear-gradient(120deg, #111827 0%, #312e81 55%, #7c3aed 100%);
-            box-shadow: 0 18px 45px rgba(49, 46, 129, 0.18);
-            margin-bottom: 1.5rem;
+            background:
+                linear-gradient(90deg, rgba(8, 9, 13, .25), transparent 45%),
+                linear-gradient(120deg, #2b1213 0%, #7a2924 58%, #b94d32 100%);
+            box-shadow: 0 20px 55px rgba(0, 0, 0, .38);
+            margin-bottom: 1.8rem;
         }
-        .hero h1 { margin: 0; font-size: 2.8rem; }
-        .hero p { margin: .45rem 0 0; color: #e0e7ff; font-size: 1.08rem; }
+        .hero::after {
+            content: "CINEMA";
+            position: absolute;
+            right: -1rem;
+            bottom: -1.1rem;
+            color: rgba(255, 235, 205, .08);
+            font-size: clamp(4rem, 10vw, 7rem);
+            font-weight: 900;
+            letter-spacing: .04em;
+        }
+        .hero h1 {
+            position: relative;
+            z-index: 1;
+            margin: 0;
+            font-size: 2.8rem;
+            letter-spacing: -.035em;
+        }
+        .hero p {
+            position: relative;
+            z-index: 1;
+            margin: .45rem 0 0;
+            color: #f5ded2 !important;
+            font-size: 1.08rem;
+        }
         .source-card {
-            border: 1px solid #e5e7eb;
-            border-radius: 14px;
+            border: 1px solid var(--line);
+            border-left: 3px solid var(--gold);
+            border-radius: 8px;
             padding: .8rem 1rem;
-            background: white;
+            background: var(--panel);
+            color: var(--ink);
+        }
+        [data-testid="stAlert"] {
+            border: 1px solid var(--line);
+            background: var(--panel-soft);
+        }
+        [data-testid="stAlert"] p { color: #dbe7f8 !important; }
+        div.stButton > button {
+            border: 1px solid #3a3d48;
+            border-radius: 6px;
+            background: var(--panel);
+            color: var(--ink);
+        }
+        div.stButton > button:hover {
+            border-color: var(--accent);
+            color: #ffffff;
+        }
+        div.stButton > button p { color: inherit !important; }
+        [data-testid="stChatMessage"] {
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: rgba(20, 22, 29, .92);
+        }
+        [data-testid="stChatInput"] {
+            overflow: hidden;
+            border: 1px solid #3b3e49;
+            border-radius: 8px;
+            background: var(--panel) !important;
+        }
+        [data-testid="stChatInput"] > div,
+        [data-testid="stChatInput"] > div > div,
+        [data-testid="stChatInput"] textarea {
+            background: var(--panel) !important;
+            color: var(--ink) !important;
+            -webkit-text-fill-color: var(--ink) !important;
+        }
+        [data-testid="stChatInput"] textarea::placeholder {
+            color: #85828a !important;
+            -webkit-text-fill-color: #85828a !important;
         }
     </style>
     """,
