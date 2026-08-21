@@ -50,7 +50,9 @@ class ResponseGenerator:
         for movie in movies:
             year = str(movie.get("release_date") or "")[:4]
             suffix = f" ({year})" if year else ""
-            rows.append(f"- **{movie['title']}**{suffix}")
+            score = movie.get("match_score")
+            match = f" · {score:.0%} match" if isinstance(score, float) else ""
+            rows.append(f"- **{movie['title']}**{suffix}{match}")
         return heading + "\n\n" + "\n".join(rows)
 
     @staticmethod

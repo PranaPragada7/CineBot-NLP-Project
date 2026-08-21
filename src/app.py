@@ -6,7 +6,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from src.conversation import ConversationManager
 
@@ -41,18 +41,44 @@ class FeedbackRequest(BaseModel):
     rating: int = Field(ge=-1, le=1)
 
 
+class RecommendationRequest(BaseModel):
+    seed_title: str | None = Field(default=None, min_length=1, max_length=200)
+    query: str | None = Field(default=None, min_length=1, max_length=500)
+    user_id: str | None = Field(default=None, min_length=1, max_length=80)
+    limit: int = Field(default=5, ge=1, le=10)
+
+    @model_validator(mode="after")
+    def require_recommendation_signal(self) -> RecommendationRequest:
+        if not self.seed_title and not self.query and not self.user_id:
+            raise ValueError("Provide a seed title, natural-language query, or user ID.")
+        return self
+
+
+class MovieRatingRequest(BaseModel):
+    user_id: str = Field(min_length=1, max_length=80)
+    movie_id: int = Field(gt=0)
+    rating: float = Field(ge=1, le=5)
+
+
 def create_app(manager: ConversationManager | None = None) -> FastAPI:
     app = FastAPI(
         title="CineBot API",
-        description="Intent-aware movie discovery API with TMDB and offline fallback data.",
-        version="2.0.0",
+        description=(
+            "Movie discovery API with FAISS retrieval, NMF/SVD recommendations, "
+            "and TMDB metadata."
+        ),
+        version="3.0.0",
     )
     app.state.manager = manager or ConversationManager()
 
     @app.get("/health")
-    def health_check(request: Request) -> dict[str, str]:
+    def health_check(request: Request) -> dict[str, Any]:
         active_manager: ConversationManager = request.app.state.manager
-        return {"status": "ok", "data_source": active_manager.data_source}
+        return {
+            "status": "ok",
+            "data_source": active_manager.data_source,
+            "recommender": active_manager.model_info,
+        }
 
     @app.post("/chat", response_model=ChatResponse)
     def chat_endpoint(payload: ChatRequest, request: Request) -> dict[str, Any]:
@@ -73,6 +99,32 @@ def create_app(manager: ConversationManager | None = None) -> FastAPI:
         )
         if not saved:
             raise HTTPException(status_code=404, detail="Message was not found.")
+        return {"ok": True}
+
+    @app.post("/recommendations")
+    def recommendations_endpoint(
+        payload: RecommendationRequest, request: Request
+    ) -> dict[str, Any]:
+        active_manager: ConversationManager = request.app.state.manager
+        recommendations = active_manager.recommendations(
+            seed_title=payload.seed_title,
+            query=payload.query,
+            user_id=payload.user_id,
+            limit=payload.limit,
+        )
+        if payload.seed_title and not recommendations:
+            raise HTTPException(status_code=404, detail="Seed movie was not found in the catalog.")
+        return {"recommendations": recommendations, "model": active_manager.model_info}
+
+    @app.post("/ratings")
+    def movie_rating_endpoint(payload: MovieRatingRequest, request: Request) -> dict[str, bool]:
+        active_manager: ConversationManager = request.app.state.manager
+        try:
+            active_manager.record_movie_rating(payload.user_id, payload.movie_id, payload.rating)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404, detail="Movie was not found in the catalog."
+            ) from exc
         return {"ok": True}
 
     @app.get("/history/{session_id}")

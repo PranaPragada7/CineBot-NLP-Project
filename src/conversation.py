@@ -6,6 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 from src.nlp.pipeline import NLPPipeline
+from src.recommendation import HybridRecommender
 from src.response_generator import ResponseGenerator
 from src.services.tmdb import TMDbClient
 
@@ -13,8 +14,13 @@ from src.services.tmdb import TMDbClient
 class ConversationManager:
     """Coordinates intent detection, movie retrieval, and session history."""
 
-    def __init__(self, tmdb_client: TMDbClient | None = None) -> None:
+    def __init__(
+        self,
+        tmdb_client: TMDbClient | None = None,
+        recommender: HybridRecommender | None = None,
+    ) -> None:
         self.tmdb_client = tmdb_client or TMDbClient()
+        self.recommender = recommender or HybridRecommender()
         self.pipeline = NLPPipeline(self.tmdb_client.known_titles)
         self.responses = ResponseGenerator()
         self._sessions: dict[str, dict[str, Any]] = {}
@@ -23,6 +29,10 @@ class ConversationManager:
     @property
     def data_source(self) -> str:
         return self.tmdb_client.source_label
+
+    @property
+    def model_info(self) -> dict[str, Any]:
+        return self.recommender.model_info
 
     def _session(self, session_id: str) -> dict[str, Any]:
         with self._lock:
@@ -38,6 +48,8 @@ class ConversationManager:
         self,
         intent: str,
         title: str | None,
+        session_id: str,
+        user_message: str,
     ) -> tuple[str, dict[str, Any] | None, list[str]]:
         movie = self._resolve_movie(title)
         default_suggestions = [
@@ -72,11 +84,24 @@ class ConversationManager:
                 None,
                 default_suggestions,
             )
-        if intent in {"movie_info", "who_directed", "recommend"} and not title:
+        if intent == "recommend" and not title:
+            recommendations = self.recommender.recommend(
+                query=user_message,
+                user_id=session_id,
+            )
+            if recommendations and recommendations[0]["signals"]["semantic"] > 0:
+                return (
+                    self.responses.movie_list(
+                        "Here are matches for your description:", recommendations
+                    ),
+                    None,
+                    default_suggestions,
+                )
+            return self.responses.missing_title("find similar titles"), None, default_suggestions
+        if intent in {"movie_info", "who_directed"} and not title:
             action = {
                 "movie_info": "look it up",
                 "who_directed": "find its director",
-                "recommend": "find similar titles",
             }[intent]
             return self.responses.missing_title(action), None, default_suggestions
         if intent in {"movie_info", "who_directed", "recommend"} and not movie:
@@ -93,7 +118,11 @@ class ConversationManager:
             details = self.tmdb_client.movie_details(movie["id"]) or movie
             return self.responses.director(details), details, default_suggestions
         if intent == "recommend" and movie:
-            recommendations = self.tmdb_client.similar_movies(movie["id"])
+            recommendations = self.recommender.recommend_by_title(
+                movie["title"], user_id=session_id
+            )
+            if not recommendations:
+                recommendations = self.tmdb_client.similar_movies(movie["id"])
             return (
                 self.responses.movie_list(
                     f"If you liked **{movie['title']}**, try:", recommendations
@@ -114,7 +143,9 @@ class ConversationManager:
             ):
                 title = last_movie["title"]
 
-        reply, movie, suggestions = self._reply(nlp_result["intent"], title)
+        reply, movie, suggestions = self._reply(
+            nlp_result["intent"], title, session_id, user_message
+        )
         message_id = uuid4().hex
         turn = {
             "message_id": message_id,
@@ -142,6 +173,32 @@ class ConversationManager:
                 return False
             state["feedback"][message_id] = rating
             return True
+
+    def recommendations(
+        self,
+        *,
+        seed_title: str | None = None,
+        query: str | None = None,
+        user_id: str | None = None,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        seed_movie = self.tmdb_client.search_movie(seed_title) if seed_title else None
+        if seed_title and not seed_movie:
+            return []
+        seed_movie_id = (
+            self.recommender.movie_id_for_title(seed_movie["title"]) if seed_movie else None
+        )
+        if seed_title and seed_movie_id is None:
+            return []
+        return self.recommender.recommend(
+            seed_movie_id=seed_movie_id,
+            query=query,
+            user_id=user_id,
+            limit=limit,
+        )
+
+    def record_movie_rating(self, user_id: str, movie_id: int, rating: float) -> None:
+        self.recommender.record_rating(user_id, movie_id, rating)
 
     def clear(self, session_id: str) -> None:
         with self._lock:
