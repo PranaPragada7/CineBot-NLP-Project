@@ -1,9 +1,10 @@
 from src.conversation import ConversationManager
+from src.persistence import Database
 from src.services.tmdb import TMDbClient
 
 
 def make_manager() -> ConversationManager:
-    return ConversationManager(TMDbClient(api_key=""))
+    return ConversationManager(TMDbClient(api_key=""), database=Database.memory())
 
 
 def test_movie_information_uses_offline_catalog():

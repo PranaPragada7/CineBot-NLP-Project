@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime
-from threading import RLock
+from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
+from src.catalog import DEMO_RATINGS
 from src.nlp.pipeline import NLPPipeline
+from src.observability import RECOMMENDATION_DURATION
+from src.persistence import Database
 from src.recommendation import HybridRecommender
 from src.response_generator import ResponseGenerator
 from src.services.tmdb import TMDbClient
@@ -18,13 +22,18 @@ class ConversationManager:
         self,
         tmdb_client: TMDbClient | None = None,
         recommender: HybridRecommender | None = None,
+        database: Database | None = None,
     ) -> None:
         self.tmdb_client = tmdb_client or TMDbClient()
-        self.recommender = recommender or HybridRecommender()
+        self.database = database or Database()
+        if recommender is None:
+            ratings = deepcopy(DEMO_RATINGS)
+            for user_id, user_ratings in self.database.all_ratings().items():
+                ratings.setdefault(user_id, {}).update(user_ratings)
+            recommender = HybridRecommender(ratings=ratings)
+        self.recommender = recommender
         self.pipeline = NLPPipeline(self.tmdb_client.known_titles)
         self.responses = ResponseGenerator()
-        self._sessions: dict[str, dict[str, Any]] = {}
-        self._lock = RLock()
 
     @property
     def data_source(self) -> str:
@@ -34,12 +43,9 @@ class ConversationManager:
     def model_info(self) -> dict[str, Any]:
         return self.recommender.model_info
 
-    def _session(self, session_id: str) -> dict[str, Any]:
-        with self._lock:
-            return self._sessions.setdefault(
-                session_id,
-                {"last_movie": None, "history": [], "feedback": {}},
-            )
+    @property
+    def database_status(self) -> dict[str, str]:
+        return self.database.health()
 
     def _resolve_movie(self, title: str | None) -> dict[str, Any] | None:
         return self.tmdb_client.search_movie(title) if title else None
@@ -85,7 +91,7 @@ class ConversationManager:
                 default_suggestions,
             )
         if intent == "recommend" and not title:
-            recommendations = self.recommender.recommend(
+            recommendations = self.recommendations(
                 query=user_message,
                 user_id=session_id,
             )
@@ -118,9 +124,7 @@ class ConversationManager:
             details = self.tmdb_client.movie_details(movie["id"]) or movie
             return self.responses.director(details), details, default_suggestions
         if intent == "recommend" and movie:
-            recommendations = self.recommender.recommend_by_title(
-                movie["title"], user_id=session_id
-            )
+            recommendations = self.recommendations(seed_title=movie["title"], user_id=session_id)
             if not recommendations:
                 recommendations = self.tmdb_client.similar_movies(movie["id"])
             return (
@@ -133,11 +137,10 @@ class ConversationManager:
         return self.responses.fallback(), None, default_suggestions
 
     def handle_message(self, session_id: str, user_message: str) -> dict[str, Any]:
-        state = self._session(session_id)
         nlp_result = self.pipeline.run(user_message)
         title = nlp_result.get("movie_title")
         if not title and nlp_result["intent"] in {"movie_info", "who_directed", "recommend"}:
-            last_movie = state.get("last_movie")
+            last_movie = self.database.last_movie(session_id)
             if last_movie and any(
                 pronoun in user_message.casefold() for pronoun in ("it", "that movie", "that one")
             ):
@@ -155,24 +158,14 @@ class ConversationManager:
             "sentiment": nlp_result["sentiment"],
             "created_at": datetime.now(UTC).isoformat(),
         }
-        with self._lock:
-            state["history"].append(turn)
-            if movie:
-                state["last_movie"] = movie
+        self.database.add_turn(turn, session_id, movie)
         return {**turn, "reply": reply, "suggestions": suggestions}
 
     def history(self, session_id: str) -> list[dict[str, Any]]:
-        with self._lock:
-            state = self._sessions.get(session_id)
-            return [dict(turn) for turn in state["history"]] if state else []
+        return self.database.history(session_id)
 
     def record_feedback(self, session_id: str, message_id: str, rating: int) -> bool:
-        with self._lock:
-            state = self._sessions.get(session_id)
-            if not state or not any(turn["message_id"] == message_id for turn in state["history"]):
-                return False
-            state["feedback"][message_id] = rating
-            return True
+        return self.database.record_feedback(session_id, message_id, rating)
 
     def recommendations(
         self,
@@ -190,16 +183,30 @@ class ConversationManager:
         )
         if seed_title and seed_movie_id is None:
             return []
-        return self.recommender.recommend(
+        started_at = perf_counter()
+        with RECOMMENDATION_DURATION.time():
+            results = self.recommender.recommend(
+                seed_movie_id=seed_movie_id,
+                query=query,
+                user_id=user_id,
+                limit=limit,
+            )
+        self.database.add_recommendation_event(
+            user_id=user_id,
             seed_movie_id=seed_movie_id,
             query=query,
-            user_id=user_id,
-            limit=limit,
+            results=results,
+            latency_ms=(perf_counter() - started_at) * 1_000,
         )
+        return results
 
     def record_movie_rating(self, user_id: str, movie_id: int, rating: float) -> None:
+        if movie_id not in {int(movie["id"]) for movie in self.recommender.movies}:
+            raise KeyError(movie_id)
+        if not 1 <= rating <= 5:
+            raise ValueError("Ratings must be between 1 and 5.")
+        self.database.upsert_rating(user_id, movie_id, rating)
         self.recommender.record_rating(user_id, movie_id, rating)
 
     def clear(self, session_id: str) -> None:
-        with self._lock:
-            self._sessions.pop(session_id, None)
+        self.database.clear_session(session_id)

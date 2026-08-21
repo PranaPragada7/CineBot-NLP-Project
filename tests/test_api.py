@@ -2,12 +2,15 @@ from fastapi.testclient import TestClient
 
 from src.app import create_app
 from src.conversation import ConversationManager
+from src.persistence import Database
+from src.rate_limit import RateLimiter
 from src.services.tmdb import TMDbClient
 
 
 def make_client() -> TestClient:
-    manager = ConversationManager(TMDbClient(api_key=""))
-    return TestClient(create_app(manager))
+    manager = ConversationManager(TMDbClient(api_key=""), database=Database.memory())
+    limiter = RateLimiter(redis_url="", limit=1_000)
+    return TestClient(create_app(manager, limiter))
 
 
 def test_health_reports_offline_data_source(monkeypatch):
@@ -18,8 +21,10 @@ def test_health_reports_offline_data_source(monkeypatch):
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["status"] == "ok"
+    assert payload["status"] == "degraded"
     assert payload["data_source"] == "built-in offline catalog"
+    assert payload["database"] == {"status": "ok", "backend": "sqlite"}
+    assert payload["rate_limit"] == {"status": "degraded", "backend": "memory"}
     assert payload["recommender"]["retrieval_index"] in {
         "FAISS IndexFlatIP",
         "NumPy exact fallback (FAISS unavailable)",
@@ -129,3 +134,28 @@ def test_recommendation_endpoint_validates_request_and_unknown_movie():
         client.post("/ratings", json={"user_id": "user", "movie_id": 999, "rating": 4}).status_code
         == 404
     )
+
+
+def test_liveness_metrics_and_request_id_are_exposed():
+    client = make_client()
+
+    live = client.get("/health/live", headers={"X-Request-ID": "test-request"})
+    metrics = client.get("/metrics")
+
+    assert live.status_code == 200
+    assert live.json() == {"status": "ok"}
+    assert live.headers["X-Request-ID"] == "test-request"
+    assert metrics.status_code == 200
+    assert "cinebot_http_requests_total" in metrics.text
+
+
+def test_write_endpoints_are_rate_limited():
+    manager = ConversationManager(TMDbClient(api_key=""), database=Database.memory())
+    client = TestClient(create_app(manager, RateLimiter(redis_url="", limit=1)))
+
+    first = client.post("/chat", json={"session_id": "limited", "message": "Hello"})
+    second = client.post("/chat", json={"session_id": "limited", "message": "Hello again"})
+
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert int(second.headers["Retry-After"]) >= 1

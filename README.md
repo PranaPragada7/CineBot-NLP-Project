@@ -7,6 +7,8 @@
 ![Streamlit](https://img.shields.io/badge/Streamlit-UI-FF4B4B?logo=streamlit&logoColor=white)
 ![FAISS](https://img.shields.io/badge/Retrieval-FAISS-5B4BDB)
 ![Models](https://img.shields.io/badge/Collaborative-NMF%20%2B%20SVD-E35D3F)
+![PostgreSQL](https://img.shields.io/badge/Persistence-PostgreSQL-4169E1?logo=postgresql&logoColor=white)
+![Redis](https://img.shields.io/badge/Rate%20limits-Redis-DC382D?logo=redis&logoColor=white)
 ![TMDB](https://img.shields.io/badge/Data-TMDB-01B4E4)
 
 CineBot is an explainable hybrid movie recommender with a conversational
@@ -28,6 +30,10 @@ interactions keep local development, evaluation, CI, and Docker reproducible.
 - Independent NMF and truncated-SVD collaborative models
 - Per-result component scores explaining the hybrid rank
 - Session taste profiles updated through explicit 1–5 movie ratings
+- Persistent conversations, feedback, ratings, and recommendation events
+- PostgreSQL production storage with versioned Alembic migrations
+- Redis-backed rate limits with a reported local fallback
+- JSON request logs, request IDs, Prometheus metrics, and dependency readiness
 - Trending and upcoming-movie queries
 - Intent detection, title extraction, and lightweight sentiment signals
 - Context-aware follow-up questions within a session
@@ -48,6 +54,9 @@ flowchart LR
     R --> N[NMF collaborative model]
     R --> S[Truncated SVD model]
     C --> T[TMDB metadata client]
+    C --> DB[(PostgreSQL or SQLite)]
+    API --> RL[Redis rate limiter]
+    API --> M[Prometheus metrics and JSON logs]
     T -->|API key configured| L[TMDB live data]
     T -->|No key or request failure| O[Offline catalog]
 ```
@@ -97,6 +106,13 @@ Optionally copy the environment template and add a TMDB key:
 Copy-Item .env.example .env
 ```
 
+Apply the schema migration. Local development uses a persistent SQLite database
+under `data/`; deployed environments use the same schema on PostgreSQL.
+
+```powershell
+python -m alembic upgrade head
+```
+
 Start the API:
 
 ```powershell
@@ -117,6 +133,9 @@ the built-in offline catalog is active.
 | Method | Endpoint | Purpose |
 |---|---|---|
 | `GET` | `/health` | Service status and active data source |
+| `GET` | `/health/live` | Process liveness probe |
+| `GET` | `/health/ready` | Database, cache, and model readiness |
+| `GET` | `/metrics` | Prometheus-format service metrics |
 | `POST` | `/chat` | Process a movie question |
 | `POST` | `/recommendations` | Run the explainable hybrid ranker |
 | `POST` | `/ratings` | Add/update a 1–5 user/movie rating |
@@ -151,18 +170,40 @@ Run the API and interface together:
 docker compose up --build
 ```
 
-The compose file passes `TMDB_API_KEY` at runtime. Credentials are never copied
-into the container image.
+Compose starts PostgreSQL 16, Redis 7, the migrated FastAPI service, and the
+Streamlit UI. PostgreSQL and Redis use named volumes, so ratings and sessions
+survive container restarts. The API waits for healthy dependencies before
+applying migrations and starting.
+
+## Render deployment
+
+[`render.yaml`](render.yaml) defines two Docker web services, a managed
+PostgreSQL database, and a private Render Key Value instance. Render runs
+`alembic upgrade head` before starting the API process and checks
+`/health/ready` before routing traffic.
+
+1. Merge the feature branch into the repository's default branch.
+2. In Render, create a Blueprint from this repository.
+3. Provide `TMDB_API_KEY` when prompted, or leave it blank for offline metadata.
+4. After deployment, put the public Streamlit URL at the top of this README.
+
+The Blueprint uses managed-resource references and HTTP readiness checks. Render
+restricts dedicated pre-deploy commands to paid web instances, so the free Blueprint
+runs its migration in the API startup command. A scaled paid deployment should move
+the migration to `preDeployCommand`. Credentials are referenced from managed
+resources and are never committed.
 
 ## Deployment notes
 
-- The in-memory conversation store is intended for a single-process demo. A
-  production deployment should use a shared persistent store.
 - The built-in catalog and ratings are deliberately small, synthetic fixtures.
   They prove the end-to-end model architecture; they are not evidence of quality
   on real user traffic and are not a replacement for a production dataset.
 - Live results depend on TMDB availability, rate limits, and API-key access.
-- Ratings and feedback are retained only for the life of the API process.
+- SQLite is the zero-configuration local default; PostgreSQL is used by Compose
+  and the Render Blueprint. Conversations and ratings survive API restarts.
+- Redis provides shared fixed-window limits in production. When Redis is optional
+  and unavailable, `/health/ready` reports a degraded in-process fallback. When
+  `REQUIRE_REDIS=true`, readiness fails instead.
 - Re-fitting synchronously is appropriate for this tiny demonstrator. A larger
   deployment should train asynchronously, version artifacts, and load them into
   stateless API replicas.
@@ -174,6 +215,7 @@ python -m pip install -r requirements-dev.txt
 python -m black --check .
 python -m ruff check .
 python -m compileall -q src
+python -m alembic upgrade head
 python -m pytest -q
 python -m scripts.evaluate_recommender
 ```
@@ -205,10 +247,15 @@ the evaluation method inspectable.
 | `src/conversation.py` | Session context and request orchestration |
 | `src/nlp/pipeline.py` | Intent, title, and sentiment extraction |
 | `src/recommendation.py` | FAISS retrieval and hybrid NMF/SVD ranking |
+| `src/persistence.py` | SQLAlchemy models and persistence repository |
+| `src/rate_limit.py` | Redis and in-process rate-limit backends |
+| `src/observability.py` | JSON logging and Prometheus instrumentation |
 | `src/services/tmdb.py` | Live TMDB access with offline fallback |
 | `src/catalog.py` | Deterministic catalog and seeded demo interactions |
 | `src/frontend/streamlit_app.py` | Streamlit conversation interface |
 | `scripts/evaluate_recommender.py` | Leave-one-out ranking evaluation |
+| `alembic/` | Versioned PostgreSQL/SQLite schema migrations |
+| `render.yaml` | Render infrastructure-as-code Blueprint |
 | `tests/` | API, NLP, conversation, data-client, and UI tests |
 | `.github/workflows/ci.yml` | Automated formatting, lint, compile, and test checks |
 
@@ -218,6 +265,13 @@ the evaluation method inspectable.
 |---|---:|---|
 | `TMDB_API_KEY` | No | Offline catalog |
 | `CINEBOT_API_URL` | No | `http://127.0.0.1:8000` |
+| `DATABASE_URL` | No | `sqlite+pysqlite:///./data/cinebot.db` |
+| `AUTO_CREATE_SCHEMA` | No | `false` (use Alembic outside tests) |
+| `REDIS_URL` | No | In-process rate limiter |
+| `REQUIRE_REDIS` | No | `false` |
+| `RATE_LIMIT_REQUESTS` | No | `60` |
+| `RATE_LIMIT_WINDOW_SECONDS` | No | `60` |
+| `LOG_LEVEL` | No | `INFO` |
 
 This product uses the TMDB API but is not endorsed or certified by TMDB.
 

@@ -1,8 +1,45 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: cinebot
+      POSTGRES_USER: cinebot
+      POSTGRES_PASSWORD: cinebot-local
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cinebot -d cinebot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - redis-data:/data
+
   api:
     build: .
+    command:
+      - /bin/sh
+      - -c
+      - alembic upgrade head && uvicorn src.app:app --host 0.0.0.0 --port 8000
     environment:
       TMDB_API_KEY: ${TMDB_API_KEY:-}
+      DATABASE_URL: postgresql+psycopg://cinebot:cinebot-local@postgres:5432/cinebot
+      REDIS_URL: redis://redis:6379/0
+      REQUIRE_REDIS: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     ports:
       - "8000:8000"
 
@@ -17,6 +54,11 @@ services:
     environment:
       CINEBOT_API_URL: http://api:8000
     depends_on:
-      - api
+      api:
+        condition: service_started
     ports:
       - "8501:8501"
+
+volumes:
+  postgres-data:
+  redis-data:
