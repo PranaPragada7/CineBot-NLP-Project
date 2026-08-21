@@ -7,6 +7,8 @@ import requests
 import streamlit as st
 
 API_URL = os.getenv("CINEBOT_API_URL", "http://127.0.0.1:8000").rstrip("/")
+if not API_URL.startswith(("http://", "https://")):
+    API_URL = f"http://{API_URL}"
 DEFAULT_SUGGESTIONS = [
     "What is trending?",
     "Who directed Inception?",
@@ -155,13 +157,22 @@ st.markdown(
 )
 
 
-def api_status() -> tuple[bool, str]:
+def api_status() -> tuple[bool, str, dict, dict]:
     try:
         response = requests.get(f"{API_URL}/health", timeout=2)
         response.raise_for_status()
-        return True, response.json().get("data_source", "unknown source")
+        payload = response.json()
+        return (
+            True,
+            payload.get("data_source", "unknown source"),
+            payload.get("recommender", {}),
+            {
+                "database": payload.get("database", {}),
+                "rate_limit": payload.get("rate_limit", {}),
+            },
+        )
     except requests.RequestException:
-        return False, "API unavailable"
+        return False, "API unavailable", {}, {}
 
 
 def submit_message(message: str) -> None:
@@ -190,8 +201,10 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "suggestions" not in st.session_state:
     st.session_state.suggestions = list(DEFAULT_SUGGESTIONS)
+if "recommendation_results" not in st.session_state:
+    st.session_state.recommendation_results = []
 
-available, source = api_status()
+available, source, model, infrastructure = api_status()
 
 with st.sidebar:
     st.markdown("## CineBot")
@@ -203,6 +216,20 @@ with st.sidebar:
     else:
         st.error("API disconnected")
     st.caption(f"Data: {source}")
+    if model:
+        st.caption(f"Index: {model.get('retrieval_index', 'unavailable')}")
+        st.caption(f"Catalog: {model.get('catalog_size', 0)} movies")
+    database = infrastructure.get("database", {})
+    rate_limit = infrastructure.get("rate_limit", {})
+    if database:
+        st.caption(
+            f"Database: {database.get('backend', 'unknown')} · {database.get('status', 'unknown')}"
+        )
+    if rate_limit:
+        st.caption(
+            f"Rate limits: {rate_limit.get('backend', 'unknown')} · "
+            f"{rate_limit.get('status', 'unknown')}"
+        )
     st.caption(f"Endpoint: {API_URL}")
     st.markdown("---")
     if st.button("Clear conversation", use_container_width=True):
@@ -233,6 +260,68 @@ with right:
         f'<div class="source-card"><b>Data source</b><br>{source}</div>',
         unsafe_allow_html=True,
     )
+
+with st.expander("Recommendation lab · inspect the hybrid ranker"):
+    st.caption(
+        "Search by meaning, start from a movie, or combine both. Results expose the "
+        "FAISS semantic, NMF, SVD, and quality signals used in ranking."
+    )
+    seed_column, query_column = st.columns(2)
+    with seed_column:
+        seed_title = st.text_input("Seed movie", placeholder="Arrival")
+    with query_column:
+        discovery_query = st.text_input(
+            "What are you looking for?", placeholder="thoughtful science fiction about identity"
+        )
+    if st.button("Generate recommendations", type="primary"):
+        if not seed_title.strip() and not discovery_query.strip():
+            st.warning("Enter a seed movie or a discovery query.")
+        else:
+            try:
+                response = requests.post(
+                    f"{API_URL}/recommendations",
+                    json={
+                        "seed_title": seed_title.strip() or None,
+                        "query": discovery_query.strip() or None,
+                        "user_id": st.session_state.session_id,
+                        "limit": 5,
+                    },
+                    timeout=15,
+                )
+                response.raise_for_status()
+                st.session_state.recommendation_results = response.json().get("recommendations", [])
+            except requests.RequestException:
+                st.error("The recommendation service could not complete this request.")
+
+    for movie in st.session_state.recommendation_results:
+        score = float(movie.get("match_score", 0))
+        signals = movie.get("signals", {})
+        st.markdown(f"**{movie['title']}** · {score:.0%} match")
+        st.caption(
+            (
+                "Semantic {semantic:.2f} · NMF {nmf:.2f} · SVD {svd:.2f} · " "Quality {quality:.2f}"
+            ).format(
+                semantic=float(signals.get("semantic", 0)),
+                nmf=float(signals.get("nmf", 0)),
+                svd=float(signals.get("svd", 0)),
+                quality=float(signals.get("quality", 0)),
+            )
+        )
+        if st.button("Save as liked", key=f"like-{movie['id']}"):
+            try:
+                response = requests.post(
+                    f"{API_URL}/ratings",
+                    json={
+                        "user_id": st.session_state.session_id,
+                        "movie_id": movie["id"],
+                        "rating": 5,
+                    },
+                    timeout=15,
+                )
+                response.raise_for_status()
+                st.success(f"Saved {movie['title']} to your session taste profile.")
+            except requests.RequestException:
+                st.error("The rating could not be saved.")
 
 if not st.session_state.messages:
     st.info("Start with a movie title, a director question, or a recommendation request.")
