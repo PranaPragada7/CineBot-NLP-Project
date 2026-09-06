@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import html
 import os
-from uuid import uuid4
 
 import requests
 import streamlit as st
@@ -246,11 +245,45 @@ def api_status() -> tuple[bool, str, dict, dict]:
         return False, "API unavailable", {}, {}
 
 
+def authenticated_request(method: str, path: str, **kwargs) -> requests.Response:
+    """Keep one anonymous credential in this browser's Streamlit session state."""
+    if not st.session_state.get("access_token"):
+        issued = requests.post(f"{API_URL}/sessions", timeout=15)
+        issued.raise_for_status()
+        credentials = issued.json()
+        st.session_state.session_id = credentials["session_id"]
+        st.session_state.access_token = credentials["access_token"]
+    payload = kwargs.get("json")
+    if payload is not None:
+        for key in ("session_id", "user_id"):
+            if key in payload:
+                payload[key] = st.session_state.session_id
+    path = path.replace("{session_id}", st.session_state.session_id)
+    response = requests.request(
+        method,
+        f"{API_URL}{path}",
+        headers={"Authorization": f"Bearer {st.session_state.access_token}"},
+        **kwargs,
+    )
+    if response.status_code == 401:
+        st.session_state.access_token = None
+        st.session_state.session_id = None
+        st.session_state.messages = []
+        st.session_state.recommendation_results = []
+        st.session_state.session_notice = (
+            "Your visitor session expired. Submit again to start a new private session."
+        )
+        st.warning(st.session_state.session_notice)
+    response.raise_for_status()
+    return response
+
+
 def submit_message(message: str) -> None:
     st.session_state.messages.append({"role": "user", "content": message})
     try:
-        response = requests.post(
-            f"{API_URL}/chat",
+        response = authenticated_request(
+            "POST",
+            "/chat",
             json={"session_id": st.session_state.session_id, "message": message},
             timeout=15,
         )
@@ -308,13 +341,16 @@ def render_result_card(movie: dict) -> None:
 
 
 if "session_id" not in st.session_state:
-    st.session_state.session_id = uuid4().hex
+    st.session_state.session_id = None
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "suggestions" not in st.session_state:
     st.session_state.suggestions = list(DEFAULT_SUGGESTIONS)
 if "recommendation_results" not in st.session_state:
     st.session_state.recommendation_results = []
+
+if notice := st.session_state.pop("session_notice", None):
+    st.warning(notice)
 
 available, source, model, infrastructure = api_status()
 database = infrastructure.get("database", {})
@@ -352,12 +388,14 @@ with st.sidebar:
     st.markdown("**Session controls**")
     if st.button("Clear conversation", use_container_width=True):
         try:
-            requests.delete(f"{API_URL}/history/{st.session_state.session_id}", timeout=2)
+            if st.session_state.get("access_token"):
+                authenticated_request("DELETE", "/history/{session_id}", timeout=2)
         except requests.RequestException:
-            pass
-        st.session_state.messages = []
-        st.session_state.suggestions = list(DEFAULT_SUGGESTIONS)
-        st.rerun()
+            st.error("The conversation could not be cleared. Please try again.")
+        else:
+            st.session_state.messages = []
+            st.session_state.suggestions = list(DEFAULT_SUGGESTIONS)
+            st.rerun()
     st.caption(f"API endpoint · {API_URL}")
 
 st.markdown(
@@ -451,8 +489,9 @@ with discovery_tab:
             st.warning("Enter a seed movie or a discovery brief.")
         else:
             try:
-                response = requests.post(
-                    f"{API_URL}/recommendations",
+                response = authenticated_request(
+                    "POST",
+                    "/recommendations",
                     json={
                         "seed_title": seed_title.strip() or None,
                         "query": discovery_query.strip() or None,
@@ -476,8 +515,9 @@ with discovery_tab:
         render_result_card(movie)
         if st.button("Add to taste profile", key=f"like-{movie['id']}"):
             try:
-                response = requests.post(
-                    f"{API_URL}/ratings",
+                response = authenticated_request(
+                    "POST",
+                    "/ratings",
                     json={
                         "user_id": st.session_state.session_id,
                         "movie_id": movie["id"],
