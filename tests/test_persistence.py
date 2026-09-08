@@ -75,3 +75,34 @@ def test_visitor_tokens_are_hashed_persistent_and_expire(tmp_path):
             .values(expires_at=datetime.now(UTC) - timedelta(seconds=1))
         )
     assert restarted.authenticate_session(token) is None
+
+
+def test_movie_context_survives_non_movie_turns():
+    from sqlalchemy import null
+
+    from src.persistence import ConversationTurn
+
+    database = infrastructure_database()
+    manager = ConversationManager(TMDbClient(api_key=""), database=database)
+    identity = uuid4().hex
+    try:
+        manager.handle_message(identity, "Tell me about Spirited Away")
+        manager.handle_message(identity, "Hello")
+        assert database.last_movie(identity)["title"] == "Spirited Away"
+        # Existing SQL NULL rows must be skipped along with JSON null rows.
+        with database.session() as session:
+            session.add(
+                ConversationTurn(
+                    message_id=uuid4().hex,
+                    session_id=identity,
+                    user_message="hello",
+                    assistant_reply="hi",
+                    intent="greeting",
+                    sentiment={},
+                    movie=null(),
+                )
+            )
+        follow_up = manager.handle_message(identity, "Who directed that movie?")
+        assert "Hayao Miyazaki" in follow_up["reply"]
+    finally:
+        database.clear_session(identity)
