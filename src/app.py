@@ -3,12 +3,13 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Annotated, Any
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from src.conversation import ConversationManager
@@ -23,6 +24,29 @@ from src.rate_limit import RateLimiter
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 configure_logging()
 LOGGER = logging.getLogger(__name__)
+bearer = HTTPBearer(auto_error=False)
+
+
+def current_session(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+) -> str:
+    identity = None
+    if credentials and credentials.scheme.lower() == "bearer":
+        identity = request.app.state.manager.database.authenticate_session(credentials.credentials)
+    if identity is None:
+        raise HTTPException(
+            401, "Valid session bearer token required", headers={"WWW-Authenticate": "Bearer"}
+        )
+    return identity
+
+
+SessionIdentity = Annotated[str, Depends(current_session)]
+
+
+def require_owner(claimed_id: str, identity: str) -> None:
+    if claimed_id != identity:
+        raise HTTPException(403, "This session belongs to another visitor")
 
 
 class ChatRequest(BaseModel):
@@ -90,7 +114,7 @@ def create_app(
     async def request_observability(request: Request, call_next):
         request_id = request.headers.get("X-Request-ID", "").strip()[:100] or uuid4().hex
         started_at = perf_counter()
-        limited_paths = {"/chat", "/feedback", "/recommendations", "/ratings"}
+        limited_paths = {"/sessions", "/chat", "/feedback", "/recommendations", "/ratings"}
         try:
             if request.method == "POST" and request.url.path in limited_paths:
                 client_host = request.client.host if request.client else "unknown"
@@ -127,6 +151,8 @@ def create_app(
         HTTP_REQUESTS.labels(request.method, route_path, str(response.status_code)).inc()
         HTTP_DURATION.labels(request.method, route_path).observe(duration)
         response.headers["X-Request-ID"] = request_id
+        if request.url.path in limited_paths or request.url.path.startswith("/history/"):
+            response.headers["Cache-Control"] = "no-store"
         LOGGER.info(
             "http_request",
             extra={
@@ -176,7 +202,10 @@ def create_app(
         return Response(content=content, media_type=media_type)
 
     @app.post("/chat", response_model=ChatResponse)
-    def chat_endpoint(payload: ChatRequest, request: Request) -> dict[str, Any]:
+    def chat_endpoint(
+        payload: ChatRequest, request: Request, identity: SessionIdentity
+    ) -> dict[str, Any]:
+        require_owner(payload.session_id, identity)
         active_manager: ConversationManager = request.app.state.manager
         try:
             return active_manager.handle_message(payload.session_id, payload.message)
@@ -185,7 +214,10 @@ def create_app(
             raise HTTPException(status_code=500, detail="Unable to process the request.") from exc
 
     @app.post("/feedback")
-    def feedback_endpoint(payload: FeedbackRequest, request: Request) -> dict[str, bool]:
+    def feedback_endpoint(
+        payload: FeedbackRequest, request: Request, identity: SessionIdentity
+    ) -> dict[str, bool]:
+        require_owner(payload.session_id, identity)
         active_manager: ConversationManager = request.app.state.manager
         saved = active_manager.record_feedback(
             payload.session_id,
@@ -198,13 +230,15 @@ def create_app(
 
     @app.post("/recommendations")
     def recommendations_endpoint(
-        payload: RecommendationRequest, request: Request
+        payload: RecommendationRequest, request: Request, identity: SessionIdentity
     ) -> dict[str, Any]:
+        if payload.user_id is not None:
+            require_owner(payload.user_id, identity)
         active_manager: ConversationManager = request.app.state.manager
         recommendations = active_manager.recommendations(
             seed_title=payload.seed_title,
             query=payload.query,
-            user_id=payload.user_id,
+            user_id=identity,
             limit=payload.limit,
         )
         if payload.seed_title and not recommendations:
@@ -212,7 +246,10 @@ def create_app(
         return {"recommendations": recommendations, "model": active_manager.model_info}
 
     @app.post("/ratings")
-    def movie_rating_endpoint(payload: MovieRatingRequest, request: Request) -> dict[str, bool]:
+    def movie_rating_endpoint(
+        payload: MovieRatingRequest, request: Request, identity: SessionIdentity
+    ) -> dict[str, bool]:
+        require_owner(payload.user_id, identity)
         active_manager: ConversationManager = request.app.state.manager
         try:
             active_manager.record_movie_rating(payload.user_id, payload.movie_id, payload.rating)
@@ -223,15 +260,26 @@ def create_app(
         return {"ok": True}
 
     @app.get("/history/{session_id}")
-    def history_endpoint(session_id: str, request: Request) -> dict[str, Any]:
+    def history_endpoint(
+        session_id: str, request: Request, identity: SessionIdentity
+    ) -> dict[str, Any]:
+        require_owner(session_id, identity)
         active_manager: ConversationManager = request.app.state.manager
         return {"history": active_manager.history(session_id)}
 
     @app.delete("/history/{session_id}")
-    def clear_history_endpoint(session_id: str, request: Request) -> dict[str, bool]:
+    def clear_history_endpoint(
+        session_id: str, request: Request, identity: SessionIdentity
+    ) -> dict[str, bool]:
+        require_owner(session_id, identity)
         active_manager: ConversationManager = request.app.state.manager
         active_manager.clear(session_id)
         return {"ok": True}
+
+    @app.post("/sessions", status_code=201)
+    def create_session(request: Request, response: Response) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store"
+        return request.app.state.manager.database.issue_session()
 
     return app
 

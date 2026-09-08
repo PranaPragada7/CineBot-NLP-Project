@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import os
+import secrets
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -16,6 +18,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    cast,
     create_engine,
     delete,
     select,
@@ -30,6 +33,14 @@ from sqlalchemy.pool import StaticPool
 
 class Base(DeclarativeBase):
     pass
+
+
+class VisitorSession(Base):
+    __tablename__ = "visitor_sessions"
+
+    session_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
 
 
 class ConversationTurn(Base):
@@ -181,8 +192,13 @@ class Database:
                 .where(
                     ConversationTurn.session_id == session_id,
                     ConversationTurn.movie.is_not(None),
+                    # JSON null is distinct from SQL NULL, including in old rows.
+                    cast(ConversationTurn.movie, Text) != "null",
                 )
-                .order_by(ConversationTurn.created_at.desc(), ConversationTurn.message_id.desc())
+                .order_by(
+                    ConversationTurn.created_at.desc(),
+                    ConversationTurn.message_id.desc(),
+                )
                 .limit(1)
             )
             return dict(turn.movie) if turn and turn.movie else None
@@ -212,6 +228,39 @@ class Database:
             for row in active_session.scalars(select(MovieRating)).all():
                 ratings.setdefault(row.user_id, {})[row.movie_id] = row.rating
             return ratings
+
+    def issue_session(self) -> dict[str, Any]:
+        token = secrets.token_urlsafe(32)
+        session_id = uuid4().hex
+        expires_at = datetime.now(UTC) + timedelta(days=7)
+        with self.session() as active_session:
+            active_session.execute(
+                delete(VisitorSession).where(VisitorSession.expires_at <= datetime.now(UTC))
+            )
+            active_session.add(
+                VisitorSession(
+                    session_id=session_id,
+                    token_hash=hashlib.sha256(token.encode()).hexdigest(),
+                    expires_at=expires_at,
+                )
+            )
+        return {
+            "session_id": session_id,
+            "access_token": token,
+            "token_type": "bearer",
+            "expires_at": expires_at.isoformat(),
+        }
+
+    def authenticate_session(self, token: str) -> str | None:
+        if not 1 <= len(token) <= 128:
+            return None
+        with self.session() as active_session:
+            return active_session.scalar(
+                select(VisitorSession.session_id).where(
+                    VisitorSession.token_hash == hashlib.sha256(token.encode()).hexdigest(),
+                    VisitorSession.expires_at > datetime.now(UTC),
+                )
+            )
 
     def upsert_rating(self, user_id: str, movie_id: int, rating: float) -> None:
         with self.session() as active_session:

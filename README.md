@@ -132,6 +132,7 @@ the built-in offline catalog is active.
 
 | Method | Endpoint | Purpose |
 |---|---|---|
+| `POST` | `/sessions` | Issue an anonymous visitor ID and expiring bearer credential |
 | `GET` | `/health` | Service status and active data source |
 | `GET` | `/health/live` | Process liveness probe |
 | `GET` | `/health/ready` | Database, cache, and model readiness |
@@ -145,18 +146,34 @@ the built-in offline catalog is active.
 
 Interactive API documentation is available at `http://127.0.0.1:8000/docs`.
 
+Create a visitor session first and send its bearer token on chat, feedback,
+recommendation, rating, and history requests. The server assigns the identity;
+supplied `session_id`/`user_id` values must match that identity or receive `403`.
+Missing, invalid, or expired credentials receive `401`. Tokens expire after seven
+days; only SHA-256 token hashes are persisted, so credentials survive API restarts
+without storing reusable plaintext tokens in the database. Use HTTPS outside local
+development and keep the bearer credential private.
+
+The Streamlit UI obtains a credential on first interaction and retains it in that
+browser's server-side session state. This is anonymous session ownership, not an
+account system: losing the credential requires a new session. Migration
+`20260906_0002` adds session credentials; legacy unprotected IDs cannot be claimed
+through the API. Existing records are preserved but have no public recovery path.
+
 Example hybrid request:
 
 ```powershell
+$session = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/sessions
+$headers = @{ Authorization = "Bearer $($session.access_token)" }
 $body = @{
   seed_title = "Arrival"
   query = "thoughtful science fiction about identity"
-  user_id = "demo-user"
+  user_id = $session.session_id
   limit = 5
 } | ConvertTo-Json
 
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/recommendations `
-  -ContentType application/json -Body $body
+  -Headers $headers -ContentType application/json -Body $body
 ```
 
 Each result includes `match_score`, the underlying `semantic`, `nmf`, `svd`, and

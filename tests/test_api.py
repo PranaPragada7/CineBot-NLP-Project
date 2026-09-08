@@ -1,3 +1,4 @@
+import pytest
 from fastapi.testclient import TestClient
 
 from src.app import create_app
@@ -10,7 +11,11 @@ from src.services.tmdb import TMDbClient
 def make_client() -> TestClient:
     manager = ConversationManager(TMDbClient(api_key=""), database=Database.memory())
     limiter = RateLimiter(redis_url="", limit=1_000)
-    return TestClient(create_app(manager, limiter))
+    client = TestClient(create_app(manager, limiter))
+    identity = client.post("/sessions").json()
+    client.headers["Authorization"] = "Bearer " + identity["access_token"]
+    client.visitor_id = identity["session_id"]
+    return client
 
 
 def test_health_reports_offline_data_source(monkeypatch):
@@ -37,7 +42,7 @@ def test_chat_history_feedback_and_clear():
 
     chat = client.post(
         "/chat",
-        json={"session_id": "session-1", "message": "Who directed Inception?"},
+        json={"session_id": client.visitor_id, "message": "Who directed Inception?"},
     )
     assert chat.status_code == 200
     payload = chat.json()
@@ -47,7 +52,7 @@ def test_chat_history_feedback_and_clear():
     feedback = client.post(
         "/feedback",
         json={
-            "session_id": "session-1",
+            "session_id": client.visitor_id,
             "message_id": payload["message_id"],
             "rating": 1,
         },
@@ -55,13 +60,13 @@ def test_chat_history_feedback_and_clear():
     assert feedback.status_code == 200
     assert feedback.json() == {"ok": True}
 
-    history = client.get("/history/session-1")
+    history = client.get(f"/history/{client.visitor_id}")
     assert history.status_code == 200
     assert len(history.json()["history"]) == 1
 
-    cleared = client.delete("/history/session-1")
+    cleared = client.delete(f"/history/{client.visitor_id}")
     assert cleared.status_code == 200
-    assert client.get("/history/session-1").json() == {"history": []}
+    assert client.get(f"/history/{client.visitor_id}").json() == {"history": []}
 
 
 def test_feedback_rejects_unknown_message():
@@ -69,7 +74,7 @@ def test_feedback_rejects_unknown_message():
 
     response = client.post(
         "/feedback",
-        json={"session_id": "missing", "message_id": "unknown", "rating": -1},
+        json={"session_id": client.visitor_id, "message_id": "unknown", "rating": -1},
     )
 
     assert response.status_code == 404
@@ -80,7 +85,7 @@ def test_chat_validates_blank_messages():
 
     response = client.post(
         "/chat",
-        json={"session_id": "session-1", "message": "   "},
+        json={"session_id": client.visitor_id, "message": "   "},
     )
 
     assert response.status_code == 422
@@ -94,7 +99,7 @@ def test_recommendation_endpoint_returns_model_signals():
         json={
             "seed_title": "Arrival",
             "query": "thoughtful science fiction",
-            "user_id": "api-user",
+            "user_id": client.visitor_id,
             "limit": 3,
         },
     )
@@ -114,8 +119,10 @@ def test_recommendation_endpoint_returns_model_signals():
 def test_rating_endpoint_updates_personalization_model():
     client = make_client()
 
-    saved = client.post("/ratings", json={"user_id": "new-user", "movie_id": 6, "rating": 5})
-    recommendations = client.post("/recommendations", json={"user_id": "new-user", "limit": 5})
+    saved = client.post("/ratings", json={"user_id": client.visitor_id, "movie_id": 6, "rating": 5})
+    recommendations = client.post(
+        "/recommendations", json={"user_id": client.visitor_id, "limit": 5}
+    )
 
     assert saved.status_code == 200
     assert saved.json() == {"ok": True}
@@ -131,7 +138,9 @@ def test_recommendation_endpoint_validates_request_and_unknown_movie():
         client.post("/recommendations", json={"seed_title": "Not A Real Film"}).status_code == 404
     )
     assert (
-        client.post("/ratings", json={"user_id": "user", "movie_id": 999, "rating": 4}).status_code
+        client.post(
+            "/ratings", json={"user_id": client.visitor_id, "movie_id": 999, "rating": 4}
+        ).status_code
         == 404
     )
 
@@ -151,11 +160,69 @@ def test_liveness_metrics_and_request_id_are_exposed():
 
 def test_write_endpoints_are_rate_limited():
     manager = ConversationManager(TMDbClient(api_key=""), database=Database.memory())
-    client = TestClient(create_app(manager, RateLimiter(redis_url="", limit=1)))
+    client = TestClient(create_app(manager, RateLimiter(redis_url="", limit=2)))
+    identity = client.post("/sessions").json()
+    client.headers["Authorization"] = "Bearer " + identity["access_token"]
+    client.visitor_id = identity["session_id"]
 
-    first = client.post("/chat", json={"session_id": "limited", "message": "Hello"})
-    second = client.post("/chat", json={"session_id": "limited", "message": "Hello again"})
+    first = client.post("/chat", json={"session_id": client.visitor_id, "message": "Hello"})
+    second = client.post("/chat", json={"session_id": client.visitor_id, "message": "Hello again"})
 
     assert first.status_code == 200
     assert second.status_code == 429
     assert int(second.headers["Retry-After"]) >= 1
+
+
+@pytest.mark.parametrize(
+    "method,path,payload",
+    [
+        ("POST", "/chat", {"session_id": "victim", "message": "hello"}),
+        ("POST", "/feedback", {"session_id": "victim", "message_id": "message", "rating": 1}),
+        ("POST", "/ratings", {"user_id": "victim", "movie_id": 6, "rating": 5}),
+        ("POST", "/recommendations", {"user_id": "victim"}),
+        ("GET", "/history/victim", None),
+        ("DELETE", "/history/victim", None),
+    ],
+)
+def test_all_private_routes_require_credentials(method, path, payload):
+    client = make_client()
+    client.headers.pop("Authorization")
+    for headers in ({}, {"Authorization": "Bearer invalid-token"}):
+        response = client.request(method, path, json=payload, headers=headers)
+        assert response.status_code == 401
+        assert response.headers["WWW-Authenticate"] == "Bearer"
+
+
+def test_other_visitor_cannot_read_delete_or_change_owned_data():
+    owner = make_client()
+    attacker = TestClient(owner.app)
+    identity = attacker.post("/sessions").json()
+    attacker.headers["Authorization"] = "Bearer " + identity["access_token"]
+    victim = owner.visitor_id
+    message = owner.post("/chat", json={"session_id": victim, "message": "Hello"}).json()
+    requests = [
+        ("GET", f"/history/{victim}", None),
+        ("DELETE", f"/history/{victim}", None),
+        ("POST", "/chat", {"session_id": victim, "message": "Injected"}),
+        (
+            "POST",
+            "/feedback",
+            {"session_id": victim, "message_id": message["message_id"], "rating": 1},
+        ),
+        ("POST", "/ratings", {"user_id": victim, "movie_id": 6, "rating": 1}),
+        ("POST", "/recommendations", {"user_id": victim}),
+    ]
+    for method, path, payload in requests:
+        assert attacker.request(method, path, json=payload).status_code == 403
+    own_history = owner.get(f"/history/{victim}")
+    assert len(own_history.json()["history"]) == 1
+    assert own_history.headers["Cache-Control"] == "no-store"
+    assert owner.app.state.manager.database.all_ratings() == {}
+
+
+def test_session_creation_ignores_client_identity_and_is_not_cached():
+    client = make_client()
+    response = client.post("/sessions", json={"session_id": client.visitor_id})
+    assert response.status_code == 201
+    assert response.json()["session_id"] != client.visitor_id
+    assert response.headers["Cache-Control"] == "no-store"
