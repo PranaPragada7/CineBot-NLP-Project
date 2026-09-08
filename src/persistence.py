@@ -18,6 +18,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    cast,
     create_engine,
     delete,
     select,
@@ -191,8 +192,13 @@ class Database:
                 .where(
                     ConversationTurn.session_id == session_id,
                     ConversationTurn.movie.is_not(None),
+                    # JSON null is distinct from SQL NULL, including in old rows.
+                    cast(ConversationTurn.movie, Text) != "null",
                 )
-                .order_by(ConversationTurn.created_at.desc(), ConversationTurn.message_id.desc())
+                .order_by(
+                    ConversationTurn.created_at.desc(),
+                    ConversationTurn.message_id.desc(),
+                )
                 .limit(1)
             )
             return dict(turn.movie) if turn and turn.movie else None
