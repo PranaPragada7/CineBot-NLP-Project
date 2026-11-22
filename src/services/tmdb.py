@@ -55,7 +55,10 @@ class TMDbClient:
             payload = response.json()
             return payload if isinstance(payload, dict) else None
         except (requests.RequestException, ValueError) as exc:
-            LOGGER.warning("TMDB request failed for %s: %s", path, exc)
+            # Requests exception messages can contain the complete request URL,
+            # including api_key. Keep diagnostic type information without
+            # persisting credentials or upstream response bodies in logs.
+            LOGGER.warning("TMDB request failed for %s (%s)", path, type(exc).__name__)
             return None
 
     @staticmethod
@@ -72,11 +75,19 @@ class TMDbClient:
             "vote_average": float(movie.get("vote_average") or 0),
             "genres": [genre for genre in normalized_genres if genre],
             "director": movie.get("director"),
+            "data_source": "tmdb",
         }
 
     @staticmethod
     def _offline_by_id(movie_id: int) -> dict[str, Any] | None:
-        return next((dict(movie) for movie in OFFLINE_MOVIES if movie["id"] == movie_id), None)
+        return next(
+            (
+                {**movie, "data_source": "offline"}
+                for movie in OFFLINE_MOVIES
+                if movie["id"] == movie_id
+            ),
+            None,
+        )
 
     def _offline_search(self, query: str) -> dict[str, Any] | None:
         match = process.extractOne(
@@ -88,7 +99,11 @@ class TMDbClient:
         if not match:
             return None
         title = match[0]
-        return next(dict(movie) for movie in OFFLINE_MOVIES if movie["title"] == title)
+        return next(
+            {**movie, "data_source": "offline"}
+            for movie in OFFLINE_MOVIES
+            if movie["title"] == title
+        )
 
     def search_movie(self, query: str) -> dict[str, Any] | None:
         query = query.strip()
@@ -108,7 +123,9 @@ class TMDbClient:
             return self._normalize(best)
         return self._offline_search(query)
 
-    def movie_details(self, movie_id: int) -> dict[str, Any] | None:
+    def movie_details(self, movie_id: int, *, offline: bool = False) -> dict[str, Any] | None:
+        if offline or not self.is_live:
+            return self._offline_by_id(movie_id)
         payload = self._get(f"movie/{movie_id}", append_to_response="credits")
         if payload:
             movie = self._normalize(payload)
@@ -119,13 +136,19 @@ class TMDbClient:
             )
             movie["director"] = director
             return movie
-        return self._offline_by_id(movie_id)
+        # Local fixture IDs are not TMDB IDs. A failed live detail request
+        # must not accidentally resolve to an unrelated local fixture.
+        return None
 
-    def similar_movies(self, movie_id: int, limit: int = 5) -> list[dict[str, Any]]:
-        payload = self._get(f"movie/{movie_id}/similar")
+    def similar_movies(
+        self, movie_id: int, limit: int = 5, *, offline: bool = False
+    ) -> list[dict[str, Any]]:
+        payload = self._get(f"movie/{movie_id}/similar") if self.is_live and not offline else None
         results = payload.get("results", []) if payload else []
         if results:
             return [self._normalize(movie) for movie in results[:limit]]
+        if self.is_live and not offline:
+            return []
 
         seed = self._offline_by_id(movie_id)
         if not seed:
@@ -139,14 +162,14 @@ class TMDbClient:
             ),
             reverse=True,
         )
-        return [dict(movie) for movie in candidates[:limit]]
+        return [{**movie, "data_source": "offline"} for movie in candidates[:limit]]
 
     def upcoming_movies(self, limit: int = 5) -> list[dict[str, Any]]:
         payload = self._get("movie/upcoming", language="en-US", region="US")
         results = payload.get("results", []) if payload else []
         if results:
             return [self._normalize(movie) for movie in results[:limit]]
-        return [dict(movie) for movie in OFFLINE_MOVIES[:limit]]
+        return [{**movie, "data_source": "offline"} for movie in OFFLINE_MOVIES[:limit]]
 
     def trending_movies(self, limit: int = 5) -> list[dict[str, Any]]:
         payload = self._get("trending/movie/week", language="en-US")
@@ -154,7 +177,7 @@ class TMDbClient:
         if results:
             return [self._normalize(movie) for movie in results[:limit]]
         return [
-            dict(movie)
+            {**movie, "data_source": "offline"}
             for movie in sorted(
                 OFFLINE_MOVIES,
                 key=lambda item: item["vote_average"],
