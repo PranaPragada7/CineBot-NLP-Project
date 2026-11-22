@@ -53,3 +53,28 @@ def test_sessions_are_isolated():
 
     assert len(manager.history("one")) == 1
     assert manager.history("two") == []
+
+
+def test_live_search_fallback_does_not_fetch_details_using_a_local_fixture_id(monkeypatch):
+    client = TMDbClient(api_key="configured-key")
+    requested_paths = []
+
+    def intermittent_response(path, **params):
+        requested_paths.append(path)
+        if path == "search/movie":
+            return None
+        # Local Inception is fixture 1, but TMDB movie 1 is an unrelated film.
+        return {
+            "id": 1,
+            "title": "Unrelated remote film",
+            "credits": {"crew": [{"job": "Director", "name": "Wrong director"}]},
+        }
+
+    monkeypatch.setattr(client, "_get", intermittent_response)
+    manager = ConversationManager(client, database=Database.memory())
+
+    result = manager.handle_message("session", "Who directed Inception?")
+
+    assert "Christopher Nolan" in result["reply"]
+    assert "Wrong director" not in result["reply"]
+    assert requested_paths == ["search/movie"]

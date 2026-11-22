@@ -113,7 +113,12 @@ class ConversationManager:
         if intent in {"movie_info", "who_directed", "recommend"} and not movie:
             return self.responses.not_found(title or "that title"), None, default_suggestions
         if intent == "movie_info" and movie:
-            details = self.tmdb_client.movie_details(movie["id"]) or movie
+            details = (
+                self.tmdb_client.movie_details(
+                    movie["id"], offline=movie.get("data_source") == "offline"
+                )
+                or movie
+            )
             suggestions = [
                 f"Who directed {details['title']}?",
                 f"Recommend movies like {details['title']}",
@@ -121,12 +126,19 @@ class ConversationManager:
             ]
             return self.responses.movie_info(details), details, suggestions
         if intent == "who_directed" and movie:
-            details = self.tmdb_client.movie_details(movie["id"]) or movie
+            details = (
+                self.tmdb_client.movie_details(
+                    movie["id"], offline=movie.get("data_source") == "offline"
+                )
+                or movie
+            )
             return self.responses.director(details), details, default_suggestions
         if intent == "recommend" and movie:
             recommendations = self.recommendations(seed_title=movie["title"], user_id=session_id)
             if not recommendations:
-                recommendations = self.tmdb_client.similar_movies(movie["id"])
+                recommendations = self.tmdb_client.similar_movies(
+                    movie["id"], offline=movie.get("data_source") == "offline"
+                )
             return (
                 self.responses.movie_list(
                     f"If you liked **{movie['title']}**, try:", recommendations
